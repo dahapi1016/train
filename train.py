@@ -567,7 +567,7 @@ def get_hybrid_model_results(model, test_loader, y_test, device):
         }
     }
 
-、def grid_search_penalty_weights(model_class, X_train, y_train, wait_train, loss_train, overload_train,
+def grid_search_penalty_weights(model_class, X_train, y_train, wait_train, loss_train, overload_train,
                                X_val, y_val, wait_val, loss_val, overload_val,
                                n_nurse_classes, n_doctor_classes, device):
     """网格搜索最佳惩罚函数权重参数"""
