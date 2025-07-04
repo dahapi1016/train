@@ -1626,18 +1626,37 @@ def enhanced_three_stage_training(model, train_loader, val_loader, device, best_
     model.load_state_dict(torch.load('best_pan_dnn_model.pth'))
     return model
 
+# 在main函数中修改数据加载部分
 def main():
-    # 数据加载
-    df = pd.read_csv(DATA_PATH)
-    X = df[['scenario', 'lambda', 'mu_nurse', 'mu_doctor',
-            's_nurse_max', 's_doctor_max', 'Tmax', 'nurse_price', 'doctor_price']]
+    # 首先生成对抗性数据集
+    try:
+        df = pd.read_csv('queue_theory_challenging_data.csv')
+        print("加载现有的对抗性数据集")
+    except FileNotFoundError:
+        print("生成新的对抗性数据集...")
+        from generate_adversarial import generate_queue_theory_challenging_data
+        df = generate_queue_theory_challenging_data(n_samples=5000)
+        df.to_csv('queue_theory_challenging_data.csv', index=False)
+        print("对抗性数据集生成完成")
+    
+    # 数据预处理
+    feature_columns = ['scenario', 'lambda', 'mu_nurse', 'mu_doctor',
+                      's_nurse_max', 's_doctor_max', 'Tmax', 'nurse_price', 'doctor_price']
+    
+    # 添加额外特征（如果存在）
+    if 'cv_nurse' in df.columns:
+        feature_columns.extend(['cv_nurse', 'cv_doctor'])
+    if 'correlation' in df.columns:
+        feature_columns.append('correlation')
+    
+    X = df[feature_columns]
     y = df[['optimal_nurses', 'optimal_doctors']].values
-
+    
     # 添加额外目标变量
     wait_times = df['system_total_time'].values if 'system_total_time' in df.columns else np.zeros(len(df))
     patient_loss = df['patient_loss'].values if 'patient_loss' in df.columns else np.zeros(len(df))
     hospital_overload = df['hospital_overload'].values if 'hospital_overload' in df.columns else np.zeros(len(df))
-
+    
     # 数据预处理
     preprocessor = ColumnTransformer(
         transformers=[
@@ -1645,94 +1664,111 @@ def main():
             ('num', StandardScaler(), ['lambda', 'mu_nurse', 'mu_doctor', 'Tmax']),
             ('passthrough', 'passthrough', ['s_nurse_max', 's_doctor_max', 'nurse_price', 'doctor_price'])
         ])
-
-    # 数据分割：训练集、验证集、测试集
+    
+    # 数据分割
     indices = np.arange(len(X))
     X_temp_idx, X_test_idx, y_temp, y_test = train_test_split(
         indices, y, test_size=0.2, random_state=42
     )
     X_train_idx, X_val_idx, y_train, y_val = train_test_split(
-        X_temp_idx, y_temp, test_size=0.25, random_state=42  # 0.25 * 0.8 = 0.2 总体
+        X_temp_idx, y_temp, test_size=0.25, random_state=42
     )
-
+    
     # 获取原始特征
     X_raw_test = X.iloc[X_test_idx]
     X_raw_val = X.iloc[X_val_idx]
-
+    
     # 预处理
     preprocessor.fit(X.iloc[X_train_idx])
     X_train = preprocessor.transform(X.iloc[X_train_idx])
     X_val = preprocessor.transform(X.iloc[X_val_idx])
     X_test = preprocessor.transform(X.iloc[X_test_idx])
-
+    
     if not isinstance(X_train, np.ndarray):
         X_train = X_train.toarray()
     if not isinstance(X_val, np.ndarray):
         X_val = X_val.toarray()
     if not isinstance(X_test, np.ndarray):
         X_test = X_test.toarray()
-
+    
     # 分割额外目标变量
     wait_train = wait_times[X_train_idx]
     wait_val = wait_times[X_val_idx]
     wait_test = wait_times[X_test_idx]
+    
     loss_train = patient_loss[X_train_idx]
     loss_val = patient_loss[X_val_idx]
     loss_test = patient_loss[X_test_idx]
+    
     overload_train = hospital_overload[X_train_idx]
     overload_val = hospital_overload[X_val_idx]
     overload_test = hospital_overload[X_test_idx]
-
+    
     max_n = df['s_nurse_max'].max()
     max_d = df['s_doctor_max'].max()
     n_nurse_classes = int(max_n) + 1
     n_doctor_classes = int(max_d) + 1
-
+    
+    # 设备设置
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"使用设备: {device}")
+    
     # 1. 网格搜索最佳惩罚函数参数
-    best_params = grid_search_penalty_weights(
+    print("=== 开始网格搜索最佳惩罚函数参数 ===")
+    best_params = grid_search_penalty_weights_enhanced(
         HospitalPANDNNModel, X_train, y_train, wait_train, loss_train, overload_train,
         X_val, y_val, wait_val, loss_val, overload_val,
         n_nurse_classes, n_doctor_classes, device
     )
-
+    
     # 创建数据加载器
     train_dataset = HospitalDataset(X_train, y_train, wait_train, loss_train, overload_train)
     test_dataset = HospitalDataset(X_test, y_test, wait_test, loss_test, overload_test)
     val_dataset = HospitalDataset(X_val, y_val, wait_val, loss_val, overload_val)
-
+    
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
-
-    # 2. 使用原始模型（而不是增强版）
-    model = HospitalPANDNNModel(  # 改回原始模型
+    
+    # 2. 创建模型
+    model = HospitalPANDNNModel(
         input_dim=X_train.shape[1],
         hidden_layers=HIDDEN_LAYERS,
         n_nurse_classes=n_nurse_classes,
         n_doctor_classes=n_doctor_classes
     ).to(device)
-
+    
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()):,}")
     print(f"使用最佳惩罚函数参数: {best_params}")
-
-    # 使用修正版三阶段训练
-    model = modified_three_stage_training(model, train_loader, val_loader, device, best_params)
-
-    # 3. 基于惩罚函数损失的对比分析
+    
+    # 3. 使用终极四阶段训练
+    model = ultimate_four_stage_training(model, train_loader, val_loader, device, best_params)
+    
+    # 4. 运行对抗性对比分析
+    print("\n=== 开始对抗性对比分析 ===")
+    
+    # 先运行标准对比分析获取结果
     penalty_losses, hybrid_results, traditional_results, queue_results = run_comparison_analysis_with_penalty(
         X_train, X_test, y_train, y_test, X_raw_test,
         n_nurse_classes, n_doctor_classes, device, model, test_loader, best_params
     )
-
-    print("\n=== 基于惩罚函数的方法比较完成 ===")
-    sorted_methods = sorted(penalty_losses.items(), key=lambda x: x[1])
-    for i, (method, loss) in enumerate(sorted_methods, 1):
-        print(f"{i}. {method}: {loss:.4f}")
-
-if __name__ == '__main__':
-    main()
-
-# =================== 增强版惩罚函数与终极训练/分析 ===================
+    
+    # 然后进行排队论失效分析
+    from adversarial_comparison import queue_theory_failure_analysis, create_queue_theory_failure_visualization, print_queue_theory_failure_report
+    
+    failure_analysis, problematic_mask = queue_theory_failure_analysis(
+        hybrid_results, traditional_results, queue_results, X_raw_test, y_test
+    )
+    
+    if failure_analysis:
+        # 创建失效场景可视化
+        create_queue_theory_failure_visualization(failure_analysis, problematic_mask, X_raw_test)
+        
+        # 打印失效分析报告
+        print_queue_theory_failure_report(failure_analysis, problematic_mask, X_raw_test)
+    
+    print("\n=== 对抗性对比分析完成 ===")
+    return penalty_losses, hybrid_results, traditional_results, queue_results, failure_analysis
 
 def compute_enhanced_penalty_loss(hybrid_results, traditional_results, queue_results,
                                 X_raw_test, y_test, best_params):
