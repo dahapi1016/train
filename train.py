@@ -947,7 +947,7 @@ def run_comparison_analysis(X_train, X_test, y_train, y_test, X_raw_test,
                           n_nurse_classes, n_doctor_classes, device, model, test_loader):
     """运行对比分析"""
     from visualization_comparison import (
-        train_traditional_models, queue_theory_baseline,
+        train_traditional_models,
         create_comprehensive_visualization, create_performance_summary_table
     )
 
@@ -958,35 +958,16 @@ def run_comparison_analysis(X_train, X_test, y_train, y_test, X_raw_test,
         X_train, y_train, X_test, y_test, n_nurse_classes, n_doctor_classes, device
     )
 
-    # 2. 排队论基线
-    queue_nurse_pred, queue_doctor_pred = queue_theory_baseline(X_raw_test)
-    queue_results = {
-        'nurse_pred': queue_nurse_pred,
-        'doctor_pred': queue_doctor_pred,
-        'nurse_metrics': {
-            'MAE': mean_absolute_error(y_test[:, 0], queue_nurse_pred),
-            'MSE': mean_squared_error(y_test[:, 0], queue_nurse_pred),
-            'R2': r2_score(y_test[:, 0], queue_nurse_pred),
-            'Accuracy': accuracy_score(y_test[:, 0], queue_nurse_pred)
-        },
-        'doctor_metrics': {
-            'MAE': mean_absolute_error(y_test[:, 1], queue_doctor_pred),
-            'MSE': mean_squared_error(y_test[:, 1], queue_doctor_pred),
-            'R2': r2_score(y_test[:, 1], queue_doctor_pred),
-            'Accuracy': accuracy_score(y_test[:, 1], queue_doctor_pred)
-        }
-    }
-
-    # 3. 获取混合模型结果
+    # 2. 获取混合模型结果
     hybrid_results = get_hybrid_model_results(model, test_loader, y_test, device)
 
-    # 4. 创建综合可视化
-    create_comprehensive_visualization(hybrid_results, traditional_results, queue_results, y_test)
+    # 3. 创建综合可视化
+    create_comprehensive_visualization(hybrid_results, traditional_results, y_test)
 
-    # 5. 创建性能汇总表
-    create_performance_summary_table(hybrid_results, traditional_results, queue_results)
+    # 4. 创建性能汇总表
+    create_performance_summary_table(hybrid_results, traditional_results)
 
-    return hybrid_results, traditional_results, queue_results
+    return hybrid_results, traditional_results
 
 def get_hybrid_model_results(model, test_loader, y_test, device):
     """获取混合模型结果"""
@@ -1258,7 +1239,7 @@ def modified_three_stage_training(model, train_loader, val_loader, device, best_
     model.load_state_dict(torch.load('best_pan_dnn_model.pth'))
     return model
 
-def compute_penalty_loss_for_all_methods(hybrid_results, traditional_results, queue_results,
+def compute_penalty_loss_for_all_methods(hybrid_results, traditional_results,
                                        X_raw_test, y_test, best_params):
     """计算所有方法的惩罚函数损失值"""
 
@@ -1339,12 +1320,6 @@ def compute_penalty_loss_for_all_methods(hybrid_results, traditional_results, qu
         X_raw_test, y_test, best_params  # 传递 y_test 作为 y_true 参数
     )
 
-    # 排队论方法
-    penalty_losses['Queue Theory'] = calculate_penalty_loss(
-        queue_results['nurse_pred'], queue_results['doctor_pred'],
-        X_raw_test, y_test, best_params  # 传递 y_test 作为 y_true 参数
-    )
-
     return penalty_losses
 
 def run_comparison_analysis_with_penalty(X_train, X_test, y_train, y_test, X_raw_test,
@@ -1352,8 +1327,10 @@ def run_comparison_analysis_with_penalty(X_train, X_test, y_train, y_test, X_raw
                                        test_loader, best_params):
     """基于惩罚函数损失的对比分析"""
     from visualization_comparison import (
-        train_traditional_models, queue_theory_baseline_improved,
-        create_penalty_loss_visualization
+        train_traditional_models,
+        create_penalty_loss_visualization,
+        create_comprehensive_visualization,
+        create_performance_summary_table
     )
 
     print("\n=== 开始基于惩罚函数的对比分析 ===")
@@ -1363,32 +1340,32 @@ def run_comparison_analysis_with_penalty(X_train, X_test, y_train, y_test, X_raw
         X_train, y_train, X_test, y_test, n_nurse_classes, n_doctor_classes, device
     )
 
-    # 2. 排队论基线（使用完整算法）
-    queue_nurse_pred, queue_doctor_pred = queue_theory_baseline_improved(X_raw_test)
-    queue_results = {
-        'nurse_pred': queue_nurse_pred,
-        'doctor_pred': queue_doctor_pred
-    }
-
-    # 3. 获取混合模型结果
+    # 2. 获取混合模型结果
     hybrid_results = get_hybrid_model_results(model, test_loader, y_test, device)
 
-    # 4. 计算所有方法的修正后惩罚函数损失
+    # 3. 创建综合可视化对比（包含训练过程对比图）
+    print("\n=== 生成综合可视化对比图 ===")
+    create_comprehensive_visualization(hybrid_results, traditional_results, y_test)
+
+    # 4. 创建性能汇总表
+    create_performance_summary_table(hybrid_results, traditional_results)
+
+    # 5. 计算所有方法的修正后惩罚函数损失
     penalty_losses = compute_penalty_loss_for_all_methods(
-        hybrid_results, traditional_results, queue_results,
+        hybrid_results, traditional_results,
         X_raw_test, y_test, best_params  # 确保传递 y_test 参数
     )
 
-    # 5. 打印惩罚损失比较结果
+    # 6. 打印惩罚损失比较结果
     print("\n=== 惩罚函数损失比较结果 ===")
     sorted_methods = sorted(penalty_losses.items(), key=lambda x: x[1])
     for i, (method, loss) in enumerate(sorted_methods, 1):
         print(f"{i}. {method}: {loss:.4f}")
 
-    # 6. 创建惩罚损失可视化
+    # 7. 创建惩罚损失可视化
     create_penalty_loss_visualization(penalty_losses, best_params)
 
-    return penalty_losses, hybrid_results, traditional_results, queue_results
+    return penalty_losses, hybrid_results, traditional_results
 
 def compute_penalty_loss_for_all_methods_corrected(hybrid_results, traditional_results, queue_results, X_raw_test,y_test,  best_params):
     """计算所有方法的惩罚函数损失值（修正版）"""
@@ -1747,30 +1724,16 @@ def main():
     # 4. 运行对抗性对比分析
     print("\n=== 开始对抗性对比分析 ===")
     
-    # 先运行标准对比分析获取结果
-    penalty_losses, hybrid_results, traditional_results, queue_results = run_comparison_analysis_with_penalty(
+    # 运行标准对比分析获取结果
+    penalty_losses, hybrid_results, traditional_results = run_comparison_analysis_with_penalty(
         X_train, X_test, y_train, y_test, X_raw_test,
         n_nurse_classes, n_doctor_classes, device, model, test_loader, best_params
     )
     
-    # 然后进行排队论失效分析
-    from adversarial_comparison import queue_theory_failure_analysis, create_queue_theory_failure_visualization, print_queue_theory_failure_report
+    print("\n=== 神经网络模型对比分析完成 ===")
+    return penalty_losses, hybrid_results, traditional_results
     
-    failure_analysis, problematic_mask = queue_theory_failure_analysis(
-        hybrid_results, traditional_results, queue_results, X_raw_test, y_test
-    )
-    
-    if failure_analysis:
-        # 创建失效场景可视化
-        create_queue_theory_failure_visualization(failure_analysis, problematic_mask, X_raw_test)
-        
-        # 打印失效分析报告
-        print_queue_theory_failure_report(failure_analysis, problematic_mask, X_raw_test)
-    
-    print("\n=== 对抗性对比分析完成 ===")
-    return penalty_losses, hybrid_results, traditional_results, queue_results, failure_analysis
-
-def compute_enhanced_penalty_loss(hybrid_results, traditional_results, queue_results,
+def compute_enhanced_penalty_loss(hybrid_results, traditional_results,
                                 X_raw_test, y_test, best_params):
     """
     增强版惩罚函数损失计算 - 更好地体现混合模型优势
@@ -1920,12 +1883,6 @@ def compute_enhanced_penalty_loss(hybrid_results, traditional_results, queue_res
         X_raw_test, y_test, best_params, 'Traditional DNN'
     )
 
-    # 排队论方法
-    results['Queue Theory'] = calculate_enhanced_penalty(
-        queue_results['nurse_pred'], queue_results['doctor_pred'],
-        X_raw_test, y_test, best_params, 'Queue Theory'
-    )
-
     return results
 
 def create_enhanced_penalty_visualization(enhanced_results, best_params):
@@ -1935,7 +1892,7 @@ def create_enhanced_penalty_visualization(enhanced_results, best_params):
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
 
     methods = list(enhanced_results.keys())
-    colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A']
+    colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
 
     # 1. 总惩罚损失对比
     penalty_losses = [enhanced_results[method]['penalty_loss'] for method in methods]
@@ -2259,7 +2216,9 @@ def run_ultimate_comparison_analysis(X_train, X_test, y_train, y_test, X_raw_tes
                                    test_loader, best_params):
     """终极对比分析 - 使用增强版惩罚函数"""
     from visualization_comparison import (
-        train_traditional_models, queue_theory_baseline_improved
+        train_traditional_models,
+        create_comprehensive_visualization,
+        create_performance_summary_table
     )
 
     print("\n=== 开始终极对比分析 ===")
@@ -2269,26 +2228,26 @@ def run_ultimate_comparison_analysis(X_train, X_test, y_train, y_test, X_raw_tes
         X_train, y_train, X_test, y_test, n_nurse_classes, n_doctor_classes, device
     )
 
-    # 2. 排队论基线
-    queue_nurse_pred, queue_doctor_pred = queue_theory_baseline_improved(X_raw_test)
-    queue_results = {
-        'nurse_pred': queue_nurse_pred,
-        'doctor_pred': queue_doctor_pred
-    }
-
-    # 3. 获取混合模型结果
+    # 2. 获取混合模型结果
     hybrid_results = get_hybrid_model_results(model, test_loader, y_test, device)
 
-    # 4. 计算增强版惩罚损失
+    # 3. 创建综合可视化对比（包含训练过程对比图）
+    print("\n=== 生成综合可视化对比图 ===")
+    create_comprehensive_visualization(hybrid_results, traditional_results, y_test)
+
+    # 4. 创建性能汇总表
+    create_performance_summary_table(hybrid_results, traditional_results)
+
+    # 5. 计算增强版惩罚损失
     enhanced_results = compute_enhanced_penalty_loss(
-        hybrid_results, traditional_results, queue_results,
+        hybrid_results, traditional_results,
         X_raw_test, y_test, best_params
     )
 
-    # 5. 创建增强版可视化
+    # 6. 创建增强版可视化
     create_enhanced_penalty_visualization(enhanced_results, best_params)
 
-    # 6. 打印详细结果
+    # 7. 打印详细结果
     print("\n=== 增强版惩罚函数分析结果 ===")
     sorted_methods = sorted(enhanced_results.items(), key=lambda x: x[1]['penalty_loss'])
 
@@ -2300,7 +2259,7 @@ def run_ultimate_comparison_analysis(X_train, X_test, y_train, y_test, X_raw_tes
         print(f"   成本效率问题率: {result['cost_inefficiency_rate']:.3f}")
         print()
 
-    return enhanced_results, hybrid_results, traditional_results, queue_results
+    return enhanced_results, hybrid_results, traditional_results
 
 def grid_search_penalty_weights_enhanced(model_class, X_train, y_train, wait_train, loss_train, overload_train,
                                        X_val, y_val, wait_val, loss_val, overload_val,
@@ -2516,7 +2475,7 @@ def main():
     model = ultimate_four_stage_training(model, train_loader, val_loader, device, best_params)
 
     # 4. 终极对比分析
-    enhanced_results, hybrid_results, traditional_results, queue_results = run_ultimate_comparison_analysis(
+    enhanced_results, hybrid_results, traditional_results = run_ultimate_comparison_analysis(
         X_train, X_test, y_train, y_test, X_raw_test,
         n_nurse_classes, n_doctor_classes, device, model, test_loader, best_params
     )
