@@ -140,47 +140,86 @@ def queue_theory_baseline_improved(X_raw):
 
     return np.array(predictions_n), np.array(predictions_d)
 
-def train_traditional_models(X_train, y_train, X_test, y_test, n_nurse_classes, n_doctor_classes, device):
-    """训练传统模型"""
+def train_traditional_models_with_history(X_train, y_train, X_test, y_test,
+                                        n_nurse_classes, n_doctor_classes, device):
+    """训练传统模型并记录训练历史"""
     results = {}
+    training_histories = {}
 
     # 1. 传统PAN模型
     print("训练传统PAN模型...")
     pan_model = TraditionalPANModel(X_train.shape[1], n_nurse_classes, n_doctor_classes).to(device)
-    pan_model = train_single_model(pan_model, X_train, y_train, device, epochs=50)
+    pan_model, pan_history = train_single_model_with_history(
+        pan_model, X_train, y_train, X_test, y_test, device, epochs=50)
     results['Traditional_PAN'] = evaluate_model(pan_model, X_test, y_test, device)
+    training_histories['Traditional_PAN'] = pan_history
 
     # 2. 传统DNN模型
     print("训练传统DNN模型...")
-    dnn_model = TraditionalDNNModel(X_train.shape[1], [128, 64], n_nurse_classes, n_doctor_classes).to(device)
-    dnn_model = train_single_model(dnn_model, X_train, y_train, device, epochs=50)
+    dnn_model = TraditionalDNNModel(X_train.shape[1], [128, 64],
+                                   n_nurse_classes, n_doctor_classes).to(device)
+    dnn_model, dnn_history = train_single_model_with_history(
+        dnn_model, X_train, y_train, X_test, y_test, device, epochs=50)
     results['Traditional_DNN'] = evaluate_model(dnn_model, X_test, y_test, device)
+    training_histories['Traditional_DNN'] = dnn_history
 
-    return results
+    return results, training_histories
 
-def train_single_model(model, X_train, y_train, device, epochs=50):
-    """训练单个模型"""
+def train_single_model_with_history(model, X_train, y_train, X_test, y_test, device, epochs=50):
+    """训练单个模型并记录历史"""
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss()
 
     X_train_tensor = torch.FloatTensor(X_train).to(device)
     y_train_tensor = torch.LongTensor(y_train).to(device)
+    X_test_tensor = torch.FloatTensor(X_test).to(device)
+    y_test_tensor = torch.LongTensor(y_test).to(device)
+
+    history = {
+        'train_loss': [],
+        'val_loss': [],
+        'val_acc_nurse': [],
+        'val_acc_doctor': []
+    }
 
     model.train()
     for epoch in range(epochs):
         optimizer.zero_grad()
         nurse_logits, doctor_logits = model(X_train_tensor)
 
-        loss = (criterion(nurse_logits, y_train_tensor[:, 0]) +
-                criterion(doctor_logits, y_train_tensor[:, 1]))
+        train_loss = (criterion(nurse_logits, y_train_tensor[:, 0]) +
+                     criterion(doctor_logits, y_train_tensor[:, 1]))
 
-        loss.backward()
+        train_loss.backward()
         optimizer.step()
 
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}: Loss = {loss.item():.4f}")
+        # 验证
+        model.eval()
+        with torch.no_grad():
+            val_nurse_logits, val_doctor_logits = model(X_test_tensor)
+            val_loss = (criterion(val_nurse_logits, y_test_tensor[:, 0]) +
+                       criterion(val_doctor_logits, y_test_tensor[:, 1]))
 
-    return model
+            # 计算准确率
+            nurse_pred = torch.argmax(val_nurse_logits, dim=1)
+            doctor_pred = torch.argmax(val_doctor_logits, dim=1)
+
+            nurse_acc = (nurse_pred == y_test_tensor[:, 0]).float().mean().item()
+            doctor_acc = (doctor_pred == y_test_tensor[:, 1]).float().mean().item()
+
+        model.train()
+
+        # 记录历史
+        history['train_loss'].append(train_loss.item())
+        history['val_loss'].append(val_loss.item())
+        history['val_acc_nurse'].append(nurse_acc)
+        history['val_acc_doctor'].append(doctor_acc)
+
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch}: Train Loss = {train_loss.item():.4f}, "
+                  f"Val Loss = {val_loss.item():.4f}")
+
+    return model, history
 
 def evaluate_model(model, X_test, y_test, device):
     """评估模型"""
@@ -209,7 +248,8 @@ def evaluate_model(model, X_test, y_test, device):
         }
     }
 
-def create_comprehensive_visualization(hybrid_results, traditional_results, y_test):
+def create_comprehensive_visualization(hybrid_results, traditional_results, y_test,
+                                    hybrid_history=None, traditional_histories=None):
     """创建综合可视化对比"""
 
     print("正在生成综合对比可视化图表...")
@@ -227,15 +267,26 @@ def create_comprehensive_visualization(hybrid_results, traditional_results, y_te
     print("4. 生成预测散点图...")
     create_prediction_scatter_en(hybrid_results, traditional_results, y_test)
 
-    # 训练过程对比图表
-    print("5. 生成基础训练过程对比...")
-    create_training_comparison_en()
+    # 训练过程对比图表（使用真实数据）
+    if hybrid_history and traditional_histories:
+        print("5. 生成基础训练过程对比（真实数据）...")
+        create_training_comparison_with_real_data(hybrid_history, traditional_histories)
 
-    print("6. 生成详细训练过程对比...")
-    create_detailed_training_comparison()
+        print("6. 生成详细训练过程对比（真实数据）...")
+        create_detailed_training_comparison_with_real_data(hybrid_history, traditional_histories)
 
-    print("7. 生成训练指标对比...")
-    create_training_metrics_comparison()
+        print("7. 生成训练指标对比（真实数据）...")
+        create_training_metrics_comparison_with_real_data(hybrid_history, traditional_histories)
+
+        print("8. 生成训练阶段可视化（真实数据）...")
+        create_training_stages_visualization(hybrid_history)
+    else:
+        # 如果没有训练历史数据，使用模拟数据
+        print("5. 生成基础训练过程对比（模拟数据）...")
+        create_training_comparison_en()
+
+        print("6. 生成详细训练过程对比（模拟数据）...")
+        create_detailed_training_comparison()
 
     print("8. 生成训练阶段对比...")
     create_training_stages_comparison()
@@ -256,6 +307,98 @@ def create_comprehensive_visualization(hybrid_results, traditional_results, y_te
     print("• training_metrics_comparison.png - 训练指标对比")
     print("• training_stages_comparison.png - 训练阶段对比")
     print("• complexity_comparison.png - 复杂度对比")
+
+def create_training_stages_visualization(hybrid_history):
+    """创建混合模型训练阶段可视化"""
+    if 'stage_markers' not in hybrid_history or not hybrid_history['stage_markers']:
+        print("警告：训练历史中没有阶段标记，无法创建训练阶段可视化")
+        return
+
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+
+    # 获取训练轮次
+    epochs = range(1, len(hybrid_history['train_loss']) + 1)
+
+    # 获取阶段标记
+    stage_markers = hybrid_history['stage_markers']
+    stage_names = ['PAN预训练', '端到端微调', '注意力强化', '对抗训练']
+    colors = ['lightblue', 'lightgreen', 'lightyellow', 'lightcoral']
+
+    # 1. 训练损失曲线（带阶段标记）
+    ax1.plot(epochs, hybrid_history['train_loss'], color='#FF6B6B', linewidth=2)
+
+    # 添加阶段分隔线和背景色
+    for i in range(len(stage_markers)):
+        start = stage_markers[i]
+        end = stage_markers[i+1] if i+1 < len(stage_markers) else len(epochs)
+
+        # 添加分隔线
+        if i > 0:
+            ax1.axvline(x=start+1, color='gray', linestyle='--', alpha=0.7)
+
+        # 添加阶段标签
+        if i < len(stage_names):
+            mid_point = start + (end - start) // 2
+            y_pos = min(hybrid_history['train_loss']) + (max(hybrid_history['train_loss']) - min(hybrid_history['train_loss'])) * 0.8
+            ax1.text(mid_point, y_pos, f'阶段{i+1}:\n{stage_names[i]}',
+                     ha='center', va='center', fontsize=10,
+                     bbox=dict(boxstyle='round', facecolor=colors[i], alpha=0.7))
+
+    ax1.set_xlabel('训练轮次')
+    ax1.set_ylabel('训练损失')
+    ax1.set_title('PAN+DNN混合模型训练阶段损失曲线', fontweight='bold', size=14)
+    ax1.grid(True, alpha=0.3)
+
+    # 2. 验证损失曲线（带阶段标记）
+    ax2.plot(epochs, hybrid_history['val_loss'], color='#FF6B6B', linewidth=2)
+
+    # 添加阶段分隔线
+    for i in range(len(stage_markers)):
+        start = stage_markers[i]
+        end = stage_markers[i+1] if i+1 < len(stage_markers) else len(epochs)
+
+        # 添加分隔线
+        if i > 0:
+            ax2.axvline(x=start+1, color='gray', linestyle='--', alpha=0.7)
+
+    ax2.set_xlabel('训练轮次')
+    ax2.set_ylabel('验证损失')
+    ax2.set_title('PAN+DNN混合模型验证损失曲线', fontweight='bold', size=14)
+    ax2.grid(True, alpha=0.3)
+
+    # 3. 护士预测准确率曲线（带阶段标记）
+    ax3.plot(epochs, hybrid_history['val_acc_nurse'], color='#FF6B6B', linewidth=2, marker='o', markersize=3)
+
+    # 添加阶段分隔线
+    for i in range(len(stage_markers)):
+        start = stage_markers[i]
+        if i > 0:
+            ax3.axvline(x=start+1, color='gray', linestyle='--', alpha=0.7)
+
+    ax3.set_xlabel('训练轮次')
+    ax3.set_ylabel('护士预测准确率')
+    ax3.set_title('PAN+DNN混合模型护士预测准确率曲线', fontweight='bold', size=14)
+    ax3.grid(True, alpha=0.3)
+    ax3.set_ylim(0, 1)
+
+    # 4. 医生预测准确率曲线（带阶段标记）
+    ax4.plot(epochs, hybrid_history['val_acc_doctor'], color='#FF6B6B', linewidth=2, marker='o', markersize=3)
+
+    # 添加阶段分隔线
+    for i in range(len(stage_markers)):
+        start = stage_markers[i]
+        if i > 0:
+            ax4.axvline(x=start+1, color='gray', linestyle='--', alpha=0.7)
+
+    ax4.set_xlabel('训练轮次')
+    ax4.set_ylabel('医生预测准确率')
+    ax4.set_title('PAN+DNN混合模型医生预测准确率曲线', fontweight='bold', size=14)
+    ax4.grid(True, alpha=0.3)
+    ax4.set_ylim(0, 1)
+
+    plt.tight_layout()
+    plt.savefig('training_stages_visualization.png', dpi=300, bbox_inches='tight')
+    plt.show()
 
 def create_radar_chart_en(hybrid_results, traditional_results):
     """创建雷达图对比各方法性能（英文版）"""
@@ -461,9 +604,65 @@ def create_prediction_scatter_en(hybrid_results, traditional_results, y_test):
     plt.tight_layout()
     plt.savefig('prediction_scatter_doctors.png', dpi=300, bbox_inches='tight')
     plt.show()
+def create_training_comparison_with_real_data(hybrid_history, traditional_histories):
+    """使用真实训练数据创建训练过程对比图"""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+    # 获取训练轮次
+    hybrid_epochs = range(1, len(hybrid_history['train_loss']) + 1)
+    pan_epochs = range(1, len(traditional_histories['Traditional_PAN']['train_loss']) + 1)
+    dnn_epochs = range(1, len(traditional_histories['Traditional_DNN']['train_loss']) + 1)
+
+    # 1. 训练损失对比
+    ax1.plot(hybrid_epochs, hybrid_history['train_loss'],
+             label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2)
+    ax1.plot(pan_epochs, traditional_histories['Traditional_PAN']['train_loss'],
+             label='Traditional PAN', color='#4ECDC4', linewidth=2)
+    ax1.plot(dnn_epochs, traditional_histories['Traditional_DNN']['train_loss'],
+             label='Traditional DNN', color='#45B7D1', linewidth=2)
+
+    ax1.set_xlabel('训练轮次')
+    ax1.set_ylabel('训练损失')
+    ax1.set_title('真实训练损失曲线对比', fontweight='bold', size=14)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # 2. 收敛速度对比（找到损失稳定的轮次）
+    def find_convergence_epoch(losses, threshold=0.01):
+        if len(losses) < 10:
+            return len(losses)
+
+        for i in range(10, len(losses)):
+            recent_losses = losses[i-10:i]
+            if max(recent_losses) - min(recent_losses) < threshold:
+                return i
+        return len(losses)
+
+    convergence_data = {
+        'PAN+DNN Hybrid': find_convergence_epoch(hybrid_history['train_loss']),
+        'Traditional PAN': find_convergence_epoch(traditional_histories['Traditional_PAN']['train_loss']),
+        'Traditional DNN': find_convergence_epoch(traditional_histories['Traditional_DNN']['train_loss'])
+    }
+
+    methods = list(convergence_data.keys())
+    convergence_epochs = list(convergence_data.values())
+    colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
+
+    bars = ax2.bar(methods, convergence_epochs, color=colors, alpha=0.8)
+    ax2.set_title('实际收敛速度对比', fontweight='bold', size=14)
+    ax2.set_ylabel('收敛所需轮次')
+    ax2.tick_params(axis='x', rotation=45)
+
+    for bar, value in zip(bars, convergence_epochs):
+        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                f'{value}轮', ha='center', va='bottom', fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig('real_training_comparison.png', dpi=300, bbox_inches='tight')
+    plt.show()
 
 def create_training_comparison_en():
-    """创建训练过程对比图"""
+    """创建训练过程对比图（模拟数据）"""
     # 模拟训练过程数据
     epochs = np.arange(1, 81)
 
@@ -476,9 +675,9 @@ def create_training_comparison_en():
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
     # 训练损失对比
-    ax1.plot(epochs, hybrid_loss, label='PAN+DNN Hybrid', color='red', linewidth=2)
-    ax1.plot(epochs, pan_loss, label='Traditional PAN', color='blue', linewidth=2)
-    ax1.plot(epochs, dnn_loss, label='Traditional DNN', color='green', linewidth=2)
+    ax1.plot(epochs, hybrid_loss, label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2)
+    ax1.plot(epochs, pan_loss, label='Traditional PAN', color='#4ECDC4', linewidth=2)
+    ax1.plot(epochs, dnn_loss, label='Traditional DNN', color='#45B7D1', linewidth=2)
 
     ax1.set_xlabel('训练轮次')
     ax1.set_ylabel('训练损失')
@@ -510,9 +709,8 @@ def create_training_comparison_en():
     plt.savefig('training_comparison.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-
 def create_detailed_training_comparison():
-    """创建详细的训练过程对比图"""
+    """创建详细的训练过程对比图（模拟数据）"""
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
 
     epochs = np.arange(1, 81)
@@ -595,95 +793,166 @@ def create_detailed_training_comparison():
     plt.savefig('detailed_training_comparison.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-
-def create_training_metrics_comparison():
-    """创建训练指标详细对比图"""
+def create_detailed_training_comparison_with_real_data(hybrid_history, traditional_histories):
+    """使用真实训练数据创建详细训练过程对比图"""
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
 
-    epochs = np.arange(1, 61)  # 60个epoch
-    np.random.seed(42)
+    # 获取训练轮次
+    hybrid_epochs = range(1, len(hybrid_history['train_loss']) + 1)
+    pan_epochs = range(1, len(traditional_histories['Traditional_PAN']['train_loss']) + 1)
+    dnn_epochs = range(1, len(traditional_histories['Traditional_DNN']['train_loss']) + 1)
+
+    # 1. 训练损失对比
+    ax1.plot(hybrid_epochs, hybrid_history['train_loss'],
+             label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2)
+    ax1.plot(pan_epochs, traditional_histories['Traditional_PAN']['train_loss'],
+             label='Traditional PAN', color='#4ECDC4', linewidth=2)
+    ax1.plot(dnn_epochs, traditional_histories['Traditional_DNN']['train_loss'],
+             label='Traditional DNN', color='#45B7D1', linewidth=2)
+
+    ax1.set_xlabel('训练轮次')
+    ax1.set_ylabel('训练损失')
+    ax1.set_title('真实训练损失曲线对比', fontweight='bold', size=14)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # 2. 验证损失对比
+    ax2.plot(hybrid_epochs, hybrid_history['val_loss'],
+             label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2)
+    ax2.plot(pan_epochs, traditional_histories['Traditional_PAN']['val_loss'],
+             label='Traditional PAN', color='#4ECDC4', linewidth=2)
+    ax2.plot(dnn_epochs, traditional_histories['Traditional_DNN']['val_loss'],
+             label='Traditional DNN', color='#45B7D1', linewidth=2)
+
+    ax2.set_xlabel('训练轮次')
+    ax2.set_ylabel('验证损失')
+    ax2.set_title('真实验证损失曲线对比', fontweight='bold', size=14)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    # 3. 护士预测准确率对比
+    ax3.plot(hybrid_epochs, hybrid_history['val_acc_nurse'],
+             label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2, marker='o', markersize=3)
+    ax3.plot(pan_epochs, traditional_histories['Traditional_PAN']['val_acc_nurse'],
+             label='Traditional PAN', color='#4ECDC4', linewidth=2, marker='s', markersize=3)
+    ax3.plot(dnn_epochs, traditional_histories['Traditional_DNN']['val_acc_nurse'],
+             label='Traditional DNN', color='#45B7D1', linewidth=2, marker='^', markersize=3)
+
+    ax3.set_xlabel('训练轮次')
+    ax3.set_ylabel('护士预测准确率')
+    ax3.set_title('真实护士预测准确率对比', fontweight='bold', size=14)
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    ax3.set_ylim(0, 1)
+
+    # 4. 医生预测准确率对比
+    ax4.plot(hybrid_epochs, hybrid_history['val_acc_doctor'],
+             label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2, marker='o', markersize=3)
+    ax4.plot(pan_epochs, traditional_histories['Traditional_PAN']['val_acc_doctor'],
+             label='Traditional PAN', color='#4ECDC4', linewidth=2, marker='s', markersize=3)
+    ax4.plot(dnn_epochs, traditional_histories['Traditional_DNN']['val_acc_doctor'],
+             label='Traditional DNN', color='#45B7D1', linewidth=2, marker='^', markersize=3)
+
+    ax4.set_xlabel('训练轮次')
+    ax4.set_ylabel('医生预测准确率')
+    ax4.set_title('真实医生预测准确率对比', fontweight='bold', size=14)
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    ax4.set_ylim(0, 1)
+
+    plt.tight_layout()
+    plt.savefig('real_detailed_training_comparison.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+def create_training_metrics_comparison_with_real_data(hybrid_history, traditional_histories):
+    """使用真实训练数据创建训练指标对比图"""
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+
+    # 获取训练轮次
+    hybrid_epochs = range(1, len(hybrid_history['train_loss']) + 1)
+    pan_epochs = range(1, len(traditional_histories['Traditional_PAN']['train_loss']) + 1)
+    dnn_epochs = range(1, len(traditional_histories['Traditional_DNN']['train_loss']) + 1)
 
     # 1. 护士预测准确率对比
-    hybrid_nurse_acc = 0.6 + 0.3 * (1 - np.exp(-epochs/12)) + 0.01 * np.random.normal(0, 0.1, len(epochs))
-    pan_nurse_acc = 0.5 + 0.25 * (1 - np.exp(-epochs/15)) + 0.015 * np.random.normal(0, 0.1, len(epochs))
-    dnn_nurse_acc = 0.55 + 0.28 * (1 - np.exp(-epochs/14)) + 0.012 * np.random.normal(0, 0.1, len(epochs))
-
-    hybrid_nurse_acc = np.clip(hybrid_nurse_acc, 0, 1)
-    pan_nurse_acc = np.clip(pan_nurse_acc, 0, 1)
-    dnn_nurse_acc = np.clip(dnn_nurse_acc, 0, 1)
-
-    ax1.plot(epochs, hybrid_nurse_acc, label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2, marker='o', markersize=3)
-    ax1.plot(epochs, pan_nurse_acc, label='Traditional PAN', color='#4ECDC4', linewidth=2, marker='s', markersize=3)
-    ax1.plot(epochs, dnn_nurse_acc, label='Traditional DNN', color='#45B7D1', linewidth=2, marker='^', markersize=3)
+    ax1.plot(hybrid_epochs, hybrid_history['val_acc_nurse'],
+             label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2, marker='o', markersize=3)
+    ax1.plot(pan_epochs, traditional_histories['Traditional_PAN']['val_acc_nurse'],
+             label='Traditional PAN', color='#4ECDC4', linewidth=2, marker='s', markersize=3)
+    ax1.plot(dnn_epochs, traditional_histories['Traditional_DNN']['val_acc_nurse'],
+             label='Traditional DNN', color='#45B7D1', linewidth=2, marker='^', markersize=3)
 
     ax1.set_xlabel('训练轮次')
     ax1.set_ylabel('护士预测准确率')
-    ax1.set_title('护士数量预测准确率对比', fontweight='bold', size=14)
+    ax1.set_title('真实护士数量预测准确率对比', fontweight='bold', size=14)
     ax1.legend()
     ax1.grid(True, alpha=0.3)
-    ax1.set_ylim(0.4, 1.0)
+    ax1.set_ylim(0, 1)
 
     # 2. 医生预测准确率对比
-    hybrid_doctor_acc = 0.65 + 0.28 * (1 - np.exp(-epochs/10)) + 0.01 * np.random.normal(0, 0.1, len(epochs))
-    pan_doctor_acc = 0.55 + 0.23 * (1 - np.exp(-epochs/13)) + 0.015 * np.random.normal(0, 0.1, len(epochs))
-    dnn_doctor_acc = 0.6 + 0.25 * (1 - np.exp(-epochs/12)) + 0.012 * np.random.normal(0, 0.1, len(epochs))
-
-    hybrid_doctor_acc = np.clip(hybrid_doctor_acc, 0, 1)
-    pan_doctor_acc = np.clip(pan_doctor_acc, 0, 1)
-    dnn_doctor_acc = np.clip(dnn_doctor_acc, 0, 1)
-
-    ax2.plot(epochs, hybrid_doctor_acc, label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2, marker='o', markersize=3)
-    ax2.plot(epochs, pan_doctor_acc, label='Traditional PAN', color='#4ECDC4', linewidth=2, marker='s', markersize=3)
-    ax2.plot(epochs, dnn_doctor_acc, label='Traditional DNN', color='#45B7D1', linewidth=2, marker='^', markersize=3)
+    ax2.plot(hybrid_epochs, hybrid_history['val_acc_doctor'],
+             label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2, marker='o', markersize=3)
+    ax2.plot(pan_epochs, traditional_histories['Traditional_PAN']['val_acc_doctor'],
+             label='Traditional PAN', color='#4ECDC4', linewidth=2, marker='s', markersize=3)
+    ax2.plot(dnn_epochs, traditional_histories['Traditional_DNN']['val_acc_doctor'],
+             label='Traditional DNN', color='#45B7D1', linewidth=2, marker='^', markersize=3)
 
     ax2.set_xlabel('训练轮次')
     ax2.set_ylabel('医生预测准确率')
-    ax2.set_title('医生数量预测准确率对比', fontweight='bold', size=14)
+    ax2.set_title('真实医生数量预测准确率对比', fontweight='bold', size=14)
     ax2.legend()
     ax2.grid(True, alpha=0.3)
-    ax2.set_ylim(0.4, 1.0)
+    ax2.set_ylim(0, 1)
 
-    # 3. 约束违反率对比
-    hybrid_violation = 0.3 * np.exp(-epochs/8) + 0.05 + 0.01 * np.random.normal(0, 0.1, len(epochs))
-    pan_violation = 0.5 * np.exp(-epochs/12) + 0.12 + 0.015 * np.random.normal(0, 0.1, len(epochs))
-    dnn_violation = 0.4 * np.exp(-epochs/10) + 0.08 + 0.012 * np.random.normal(0, 0.1, len(epochs))
+    # 3. 训练损失平滑度对比（损失变化的标准差）
+    def calculate_loss_smoothness(losses):
+        if len(losses) < 2:
+            return [0]
+        return [abs(losses[i] - losses[i-1]) for i in range(1, len(losses))]
 
-    hybrid_violation = np.clip(hybrid_violation, 0, 1)
-    pan_violation = np.clip(pan_violation, 0, 1)
-    dnn_violation = np.clip(dnn_violation, 0, 1)
+    hybrid_smoothness = calculate_loss_smoothness(hybrid_history['train_loss'])
+    pan_smoothness = calculate_loss_smoothness(traditional_histories['Traditional_PAN']['train_loss'])
+    dnn_smoothness = calculate_loss_smoothness(traditional_histories['Traditional_DNN']['train_loss'])
 
-    ax3.plot(epochs, hybrid_violation, label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2, marker='o', markersize=3)
-    ax3.plot(epochs, pan_violation, label='Traditional PAN', color='#4ECDC4', linewidth=2, marker='s', markersize=3)
-    ax3.plot(epochs, dnn_violation, label='Traditional DNN', color='#45B7D1', linewidth=2, marker='^', markersize=3)
+    # 使用移动平均平滑曲线
+    def moving_average(data, window_size=5):
+        if len(data) < window_size:
+            return data
+        return np.convolve(data, np.ones(window_size)/window_size, mode='valid')
+
+    hybrid_smooth = moving_average(hybrid_smoothness)
+    pan_smooth = moving_average(pan_smoothness)
+    dnn_smooth = moving_average(dnn_smoothness)
+
+    # 绘制平滑后的曲线
+    ax3.plot(range(len(hybrid_smooth)), hybrid_smooth,
+             label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2)
+    ax3.plot(range(len(pan_smooth)), pan_smooth,
+             label='Traditional PAN', color='#4ECDC4', linewidth=2)
+    ax3.plot(range(len(dnn_smooth)), dnn_smooth,
+             label='Traditional DNN', color='#45B7D1', linewidth=2)
 
     ax3.set_xlabel('训练轮次')
-    ax3.set_ylabel('约束违反率')
-    ax3.set_title('约束违反率变化对比', fontweight='bold', size=14)
+    ax3.set_ylabel('损失变化量')
+    ax3.set_title('训练损失平滑度对比', fontweight='bold', size=14)
     ax3.legend()
     ax3.grid(True, alpha=0.3)
-    ax3.set_ylim(0, 0.6)
 
-    # 4. 训练稳定性对比（损失方差）
-    hybrid_stability = 0.1 * np.exp(-epochs/15) + 0.01 + 0.005 * np.random.normal(0, 0.1, len(epochs))
-    pan_stability = 0.2 * np.exp(-epochs/20) + 0.03 + 0.008 * np.random.normal(0, 0.1, len(epochs))
-    dnn_stability = 0.15 * np.exp(-epochs/18) + 0.02 + 0.006 * np.random.normal(0, 0.1, len(epochs))
-
-    hybrid_stability = np.abs(hybrid_stability)
-    pan_stability = np.abs(pan_stability)
-    dnn_stability = np.abs(dnn_stability)
-
-    ax4.plot(epochs, hybrid_stability, label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2, marker='o', markersize=3)
-    ax4.plot(epochs, pan_stability, label='Traditional PAN', color='#4ECDC4', linewidth=2, marker='s', markersize=3)
-    ax4.plot(epochs, dnn_stability, label='Traditional DNN', color='#45B7D1', linewidth=2, marker='^', markersize=3)
+    # 4. 验证损失对比
+    ax4.plot(hybrid_epochs, hybrid_history['val_loss'],
+             label='PAN+DNN Hybrid', color='#FF6B6B', linewidth=2)
+    ax4.plot(pan_epochs, traditional_histories['Traditional_PAN']['val_loss'],
+             label='Traditional PAN', color='#4ECDC4', linewidth=2)
+    ax4.plot(dnn_epochs, traditional_histories['Traditional_DNN']['val_loss'],
+             label='Traditional DNN', color='#45B7D1', linewidth=2)
 
     ax4.set_xlabel('训练轮次')
-    ax4.set_ylabel('训练稳定性 (损失方差)')
-    ax4.set_title('训练稳定性对比', fontweight='bold', size=14)
+    ax4.set_ylabel('验证损失')
+    ax4.set_title('验证损失对比', fontweight='bold', size=14)
     ax4.legend()
     ax4.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('training_metrics_comparison.png', dpi=300, bbox_inches='tight')
+    plt.savefig('real_training_metrics_comparison.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 
