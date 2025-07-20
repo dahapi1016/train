@@ -14,6 +14,8 @@ from sklearn.metrics import (mean_absolute_error,
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from torch.utils.data import Dataset, DataLoader
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # 设置随机种子，确保可重复性
 random.seed(42)
@@ -1719,7 +1721,17 @@ def main():
     print(f"使用最佳惩罚函数参数: {best_params}")
     
     # 3. 使用终极四阶段训练
-    model = ultimate_four_stage_training(model, train_loader, val_loader, device, best_params)
+    model, hybrid_history = ultimate_four_stage_training(model, train_loader, val_loader, device, best_params, record_history=True)
+    
+    # === 训练传统基线模型并记录训练曲线 ===
+    from visualization_comparison import TraditionalPANModel, TraditionalDNNModel
+    pan_baseline = TraditionalPANModel(X_train.shape[1], n_nurse_classes, n_doctor_classes).to(device)
+    pan_baseline, pan_history = train_traditional_model_with_history(pan_baseline, X_train, y_train, X_val, y_val, device, epochs=EPOCHS)
+    dnn_baseline = TraditionalDNNModel(X_train.shape[1], HIDDEN_LAYERS, n_nurse_classes, n_doctor_classes).to(device)
+    dnn_baseline, dnn_history = train_traditional_model_with_history(dnn_baseline, X_train, y_train, X_val, y_val, device, epochs=EPOCHS)
+    
+    # 绘制真实训练过程对比图
+    plot_training_process_comparison(hybrid_history, pan_history, dnn_history)
     
     # 4. 运行对抗性对比分析
     print("\n=== 开始对抗性对比分析 ===")
@@ -2061,16 +2073,24 @@ def adversarial_training_stage(model, train_loader, val_loader, device, best_par
     model.load_state_dict(torch.load('best_adversarial_model.pth'))
     return model
 
-def ultimate_four_stage_training(model, train_loader, val_loader, device, best_params):
+def ultimate_four_stage_training(model, train_loader, val_loader, device, best_params, record_history=False):
     """
     终极四阶段训练法：
-    1. PAN特征预训练
+    1. PAN 特征预训练
     2. 端到端微调
     3. 注意力强化
     4. 对抗训练
+
+    若 record_history=True，则会返回 (model, history)，其中 history 为
+    {"epoch": [], "train_loss": [], "val_loss": [], "stage": []}
     """
 
-    # 第一阶段：PAN特征预训练
+    # 初始化记录器
+    if record_history:
+        history = {"epoch": [], "train_loss": [], "val_loss": [], "train_acc": [], "val_acc": [], "stage": []}
+        epoch_global = 0
+
+    # ================= 第一阶段：PAN 特征预训练 =================
     print("=== 第一阶段：PAN特征预训练 ===")
     model.freeze_fc_layers()
 
@@ -2078,13 +2098,15 @@ def ultimate_four_stage_training(model, train_loader, val_loader, device, best_p
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=LEARNING_RATE * 3, weight_decay=WEIGHT_DECAY
     )
-    criterion = CustomLoss(alpha=best_params['alpha']*0.3,
-                          beta=best_params['beta']*0.5,
-                          gamma=best_params['gamma']*0.5)
+    criterion_stage1 = CustomLoss(alpha=best_params['alpha']*0.3,
+                                  beta=best_params['beta']*0.5,
+                                  gamma=best_params['gamma']*0.5)
 
     for epoch in range(25):
         model.train()
         total_loss = 0
+        total_correct = 0
+        total_samples = 0
         for features, (nurse_t, doctor_t), wait_t, loss_t, overload_t in train_loader:
             features = features.to(device)
             nurse_t, doctor_t = nurse_t.to(device), doctor_t.to(device)
@@ -2093,21 +2115,49 @@ def ultimate_four_stage_training(model, train_loader, val_loader, device, best_p
 
             optimizer_stage1.zero_grad()
             nurse_logits, doctor_logits, wait_pred = model(features)
-
-            loss, _ = criterion(
+            loss, _ = criterion_stage1(
                 nurse_logits, doctor_logits, wait_pred,
                 nurse_t, doctor_t, wait_t, loss_t, overload_t
             )
-
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer_stage1.step()
             total_loss += loss.item()
-
+            # 计算训练准确率
+            with torch.no_grad():
+                pred_n = torch.argmax(nurse_logits, dim=1)
+                pred_d = torch.argmax(doctor_logits, dim=1)
+                total_correct += (pred_n == nurse_t).sum().item() + (pred_d == doctor_t).sum().item()
+                total_samples += 2 * nurse_t.size(0)
+        avg_loss = total_loss / len(train_loader)
+        train_acc = total_correct / total_samples
+        if record_history:
+            val_loss = validate_model(model, val_loader, criterion_stage1, device)
+            # 计算验证准确率
+            val_correct = 0
+            val_total = 0
+            with torch.no_grad():
+                for f_v, (n_v, d_v), _, _, _ in val_loader:
+                    f_v = f_v.to(device)
+                    n_v = n_v.to(device)
+                    d_v = d_v.to(device)
+                    n_log, d_log, _ = model(f_v)
+                    pred_n = torch.argmax(n_log, dim=1)
+                    pred_d = torch.argmax(d_log, dim=1)
+                    val_correct += (pred_n == n_v).sum().item() + (pred_d == d_v).sum().item()
+                    val_total += 2 * n_v.size(0)
+            val_acc = val_correct / val_total if val_total > 0 else 0
+            history["epoch"].append(epoch_global)
+            history["train_loss"].append(avg_loss)
+            history["val_loss"].append(val_loss)
+            history["train_acc"].append(train_acc)
+            history["val_acc"].append(val_acc)
+            history["stage"].append("stage1")
+            epoch_global += 1
         if epoch % 5 == 0:
-            print(f"Stage 1 Epoch {epoch}: Loss = {total_loss/len(train_loader):.4f}")
+            print(f"Stage 1 Epoch {epoch}: Loss = {avg_loss:.4f}")
 
-    # 第二阶段：端到端微调
+    # ================= 第二阶段：端到端微调 =================
     print("=== 第二阶段：端到端微调 ===")
     model.unfreeze_last_layers()
 
@@ -2115,13 +2165,15 @@ def ultimate_four_stage_training(model, train_loader, val_loader, device, best_p
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=LEARNING_RATE * 1.5, weight_decay=WEIGHT_DECAY
     )
-    criterion = CustomLoss(alpha=best_params['alpha'],
-                          beta=best_params['beta']*1.2,
-                          gamma=best_params['gamma']*1.2)
+    criterion_stage2 = CustomLoss(alpha=best_params['alpha'],
+                                  beta=best_params['beta']*1.2,
+                                  gamma=best_params['gamma']*1.2)
 
     for epoch in range(35):
         model.train()
         total_loss = 0
+        total_correct = 0
+        total_samples = 0
         for features, (nurse_t, doctor_t), wait_t, loss_t, overload_t in train_loader:
             features = features.to(device)
             nurse_t, doctor_t = nurse_t.to(device), doctor_t.to(device)
@@ -2130,33 +2182,58 @@ def ultimate_four_stage_training(model, train_loader, val_loader, device, best_p
 
             optimizer_stage2.zero_grad()
             nurse_logits, doctor_logits, wait_pred = model(features)
-
-            loss, _ = criterion(
+            loss, _ = criterion_stage2(
                 nurse_logits, doctor_logits, wait_pred,
                 nurse_t, doctor_t, wait_t, loss_t, overload_t
             )
-
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer_stage2.step()
             total_loss += loss.item()
-
+            # 计算训练准确率
+            with torch.no_grad():
+                pred_n = torch.argmax(nurse_logits, dim=1)
+                pred_d = torch.argmax(doctor_logits, dim=1)
+                total_correct += (pred_n == nurse_t).sum().item() + (pred_d == doctor_t).sum().item()
+                total_samples += 2 * nurse_t.size(0)
+        avg_loss = total_loss / len(train_loader)
+        train_acc = total_correct / total_samples
+        if record_history:
+            val_loss = validate_model(model, val_loader, criterion_stage2, device)
+            # 计算验证准确率
+            val_correct = 0
+            val_total = 0
+            with torch.no_grad():
+                for f_v, (n_v, d_v), _, _, _ in val_loader:
+                    f_v = f_v.to(device)
+                    n_v = n_v.to(device)
+                    d_v = d_v.to(device)
+                    n_log, d_log, _ = model(f_v)
+                    pred_n = torch.argmax(n_log, dim=1)
+                    pred_d = torch.argmax(d_log, dim=1)
+                    val_correct += (pred_n == n_v).sum().item() + (pred_d == d_v).sum().item()
+                    val_total += 2 * n_v.size(0)
+            val_acc = val_correct / val_total if val_total > 0 else 0
+            history["epoch"].append(epoch_global)
+            history["train_loss"].append(avg_loss)
+            history["val_loss"].append(val_loss)
+            history["train_acc"].append(train_acc)
+            history["val_acc"].append(val_acc)
+            history["stage"].append("stage2")
+            epoch_global += 1
         if epoch % 10 == 0:
-            print(f"Stage 2 Epoch {epoch}: Loss = {total_loss/len(train_loader):.4f}")
+            print(f"Stage 2 Epoch {epoch}: Loss = {avg_loss:.4f}")
 
-    # 第三阶段：注意力强化
+    # ================= 第三阶段：注意力强化 =================
     print("=== 第三阶段：注意力强化 ===")
     model.unfreeze_all()
     model.enable_attention()
 
-    optimizer_stage3 = optim.Adam(
-        model.parameters(),
-        lr=LEARNING_RATE * 0.8, weight_decay=WEIGHT_DECAY
-    )
-    criterion = CustomLoss(alpha=best_params['alpha']*1.3,
-                          beta=best_params['beta']*1.8,
-                          gamma=best_params['gamma']*1.8)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer_stage3, T_max=15, eta_min=1e-6)
+    optimizer_stage3 = optim.Adam(model.parameters(), lr=LEARNING_RATE * 0.8, weight_decay=WEIGHT_DECAY)
+    criterion_stage3 = CustomLoss(alpha=best_params['alpha']*1.3,
+                                  beta=best_params['beta']*1.8,
+                                  gamma=best_params['gamma']*1.8)
+    scheduler_stage3 = optim.lr_scheduler.CosineAnnealingLR(optimizer_stage3, T_max=15, eta_min=1e-6)
 
     best_loss = float('inf')
     patience = 12
@@ -2165,7 +2242,8 @@ def ultimate_four_stage_training(model, train_loader, val_loader, device, best_p
     for epoch in range(35):
         model.train()
         total_loss = 0
-
+        total_correct = 0
+        total_samples = 0
         for features, (nurse_t, doctor_t), wait_t, loss_t, overload_t in train_loader:
             features = features.to(device)
             nurse_t, doctor_t = nurse_t.to(device), doctor_t.to(device)
@@ -2174,20 +2252,30 @@ def ultimate_four_stage_training(model, train_loader, val_loader, device, best_p
 
             optimizer_stage3.zero_grad()
             nurse_logits, doctor_logits, wait_pred = model(features)
-
-            loss, _ = criterion(
+            loss, _ = criterion_stage3(
                 nurse_logits, doctor_logits, wait_pred,
                 nurse_t, doctor_t, wait_t, loss_t, overload_t
             )
-
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer_stage3.step()
             total_loss += loss.item()
-
-        scheduler.step()
+            # 计算训练准确率
+            with torch.no_grad():
+                pred_n = torch.argmax(nurse_logits, dim=1)
+                pred_d = torch.argmax(doctor_logits, dim=1)
+                total_correct += (pred_n == nurse_t).sum().item() + (pred_d == doctor_t).sum().item()
+                total_samples += 2 * nurse_t.size(0)
         avg_loss = total_loss / len(train_loader)
-        val_loss = validate_model(model, val_loader, criterion, device)
+        train_acc = total_correct / total_samples
+        if record_history:
+            history["epoch"].append(epoch_global)
+            history["train_loss"].append(avg_loss)
+            history["val_loss"].append(validate_model(model, val_loader, criterion_stage3, device))
+            history["train_acc"].append(train_acc)
+            history["val_acc"].append(float('nan'))
+            history["stage"].append("stage3")
+            epoch_global += 1
 
         if val_loss < best_loss:
             best_loss = val_loss
@@ -2197,7 +2285,7 @@ def ultimate_four_stage_training(model, train_loader, val_loader, device, best_p
             no_improve += 1
 
         if epoch % 5 == 0:
-            print(f"Stage 3 Epoch {epoch}: Train Loss = {avg_loss:.4f}, Val Loss = {val_loss:.4f}")
+            print(f"Stage 3 Epoch {epoch}: Train Loss = {avg_loss:.4f}, Val Loss = {validate_model(model, val_loader, criterion_stage3, device):.4f}")
 
         if no_improve >= patience:
             print(f"Early stopping at epoch {epoch}")
@@ -2206,10 +2294,100 @@ def ultimate_four_stage_training(model, train_loader, val_loader, device, best_p
     # 加载第三阶段最佳模型
     model.load_state_dict(torch.load('best_stage3_model.pth'))
 
-    # 第四阶段：对抗训练
+    # ================= 第四阶段：对抗训练 =================
     model = adversarial_training_stage(model, train_loader, val_loader, device, best_params)
 
-    return model
+    if record_history:
+        # 对抗训练阶段没有记录详细 loss，只标记阶段结束点
+        history["epoch"].append(epoch_global)
+        history["train_loss"].append(float('nan'))
+        history["val_loss"].append(float('nan'))
+        history["train_acc"].append(float('nan'))
+        history["val_acc"].append(float('nan'))
+        history["stage"].append("stage4")
+        return model, history
+    else:
+        return model
+
+# ================= 真实训练过程可视化辅助函数 =================
+
+def train_traditional_model_with_history(model, X_train, y_train, X_val, y_val, device, epochs=EPOCHS):
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    criterion = nn.CrossEntropyLoss()
+    history = {"epoch": [], "train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
+
+    X_train_tensor = torch.FloatTensor(X_train).to(device)
+    y_train_tensor = torch.LongTensor(y_train).to(device)
+    X_val_tensor = torch.FloatTensor(X_val).to(device)
+    y_val_tensor = torch.LongTensor(y_val).to(device)
+
+    for ep in range(1, epochs + 1):
+        model.train()
+        optimizer.zero_grad()
+        n_logit, d_logit = model(X_train_tensor)
+        loss = criterion(n_logit, y_train_tensor[:, 0]) + criterion(d_logit, y_train_tensor[:, 1])
+        loss.backward()
+        optimizer.step()
+        train_loss = loss.item()
+
+        model.eval()
+        with torch.no_grad():
+            n_val, d_val = model(X_val_tensor)
+            val_loss = criterion(n_val, y_val_tensor[:, 0]) + criterion(d_val, y_val_tensor[:, 1])
+            pred_n_val = torch.argmax(n_val, dim=1)
+            pred_d_val = torch.argmax(d_val, dim=1)
+            val_acc = ((pred_n_val == y_val_tensor[:, 0]).float().mean() + (pred_d_val == y_val_tensor[:, 1]).float().mean())/2
+        history["epoch"].append(ep)
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss.item())
+        history["train_acc"].append(float('nan'))
+        history["val_acc"].append(val_acc.item())
+    return model, history
+
+
+def plot_training_process_comparison(hybrid_history, pan_history, dnn_history, save_path="real_training_process_comparison.png"):
+    sns.set_style("whitegrid")
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 10))
+
+    # 训练损失
+    ax1.plot(hybrid_history["epoch"], hybrid_history["train_loss"], label="PAN+DNN Hybrid", linewidth=2)
+    ax1.plot(pan_history["epoch"], pan_history["train_loss"], label="Traditional PAN", linewidth=2)
+    ax1.plot(dnn_history["epoch"], dnn_history["train_loss"], label="Traditional DNN", linewidth=2)
+    ax1.set_xlabel("训练轮次")
+    ax1.set_ylabel("训练损失")
+    ax1.set_title("训练损失对比", fontweight="bold")
+    ax1.legend()
+
+    # 验证损失
+    ax2.plot(hybrid_history["epoch"], hybrid_history["val_loss"], label="PAN+DNN Hybrid", linewidth=2)
+    ax2.plot(pan_history["epoch"], pan_history["val_loss"], label="Traditional PAN", linewidth=2)
+    ax2.plot(dnn_history["epoch"], dnn_history["val_loss"], label="Traditional DNN", linewidth=2)
+    ax2.set_xlabel("训练轮次")
+    ax2.set_ylabel("验证损失")
+    ax2.set_title("验证损失对比", fontweight="bold")
+    ax2.legend()
+
+    # 训练准确率（使用 NaN 填充空值）
+    ax3.plot(hybrid_history["epoch"], hybrid_history["train_acc"], label="PAN+DNN Hybrid", linewidth=2)
+    ax3.plot(pan_history["epoch"], pan_history["train_acc"], label="Traditional PAN", linewidth=2)
+    ax3.plot(dnn_history["epoch"], dnn_history["train_acc"], label="Traditional DNN", linewidth=2)
+    ax3.set_xlabel("训练轮次")
+    ax3.set_ylabel("训练准确率")
+    ax3.set_title("训练准确率对比", fontweight="bold")
+    ax3.legend()
+
+    # 验证准确率
+    ax4.plot(hybrid_history["epoch"], hybrid_history["val_acc"], label="PAN+DNN Hybrid", linewidth=2)
+    ax4.plot(pan_history["epoch"], pan_history["val_acc"], label="Traditional PAN", linewidth=2)
+    ax4.plot(dnn_history["epoch"], dnn_history["val_acc"], label="Traditional DNN", linewidth=2)
+    ax4.set_xlabel("训练轮次")
+    ax4.set_ylabel("验证准确率")
+    ax4.set_title("验证准确率对比", fontweight="bold")
+    ax4.legend()
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
 
 def run_ultimate_comparison_analysis(X_train, X_test, y_train, y_test, X_raw_test,
                                    n_nurse_classes, n_doctor_classes, device, model,
@@ -2431,18 +2609,20 @@ def main():
     wait_train = wait_times[X_train_idx]
     wait_val = wait_times[X_val_idx]
     wait_test = wait_times[X_test_idx]
+    
     loss_train = patient_loss[X_train_idx]
     loss_val = patient_loss[X_val_idx]
     loss_test = patient_loss[X_test_idx]
+    
     overload_train = hospital_overload[X_train_idx]
     overload_val = hospital_overload[X_val_idx]
     overload_test = hospital_overload[X_test_idx]
-
+    
     max_n = df['s_nurse_max'].max()
     max_d = df['s_doctor_max'].max()
     n_nurse_classes = int(max_n) + 1
     n_doctor_classes = int(max_d) + 1
-
+    
     # 1. 网格搜索最佳惩罚函数参数（使用更大的搜索范围）
     print("=== 扩大网格搜索范围 ===")
     best_params = grid_search_penalty_weights_enhanced(
@@ -2450,16 +2630,16 @@ def main():
         X_val, y_val, wait_val, loss_val, overload_val,
         n_nurse_classes, n_doctor_classes, device
     )
-
+    
     # 创建数据加载器
     train_dataset = HospitalDataset(X_train, y_train, wait_train, loss_train, overload_train)
     test_dataset = HospitalDataset(X_test, y_test, wait_test, loss_test, overload_test)
     val_dataset = HospitalDataset(X_val, y_val, wait_val, loss_val, overload_val)
-
+    
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
-
+    
     # 2. 创建增强模型
     model = HospitalPANDNNModel(
         input_dim=X_train.shape[1],
@@ -2467,13 +2647,23 @@ def main():
         n_nurse_classes=n_nurse_classes,
         n_doctor_classes=n_doctor_classes
     ).to(device)
-
+    
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()):,}")
     print(f"使用最佳惩罚函数参数: {best_params}")
-
+    
     # 3. 使用终极四阶段训练
-    model = ultimate_four_stage_training(model, train_loader, val_loader, device, best_params)
-
+    model, hybrid_history = ultimate_four_stage_training(model, train_loader, val_loader, device, best_params, record_history=True)
+    
+    # === 训练传统基线模型并记录训练曲线 ===
+    from visualization_comparison import TraditionalPANModel, TraditionalDNNModel
+    pan_baseline = TraditionalPANModel(X_train.shape[1], n_nurse_classes, n_doctor_classes).to(device)
+    pan_baseline, pan_history = train_traditional_model_with_history(pan_baseline, X_train, y_train, X_val, y_val, device, epochs=EPOCHS)
+    dnn_baseline = TraditionalDNNModel(X_train.shape[1], HIDDEN_LAYERS, n_nurse_classes, n_doctor_classes).to(device)
+    dnn_baseline, dnn_history = train_traditional_model_with_history(dnn_baseline, X_train, y_train, X_val, y_val, device, epochs=EPOCHS)
+    
+    # 绘制真实训练过程对比图
+    plot_training_process_comparison(hybrid_history, pan_history, dnn_history)
+    
     # 4. 终极对比分析
     enhanced_results, hybrid_results, traditional_results = run_ultimate_comparison_analysis(
         X_train, X_test, y_train, y_test, X_raw_test,
